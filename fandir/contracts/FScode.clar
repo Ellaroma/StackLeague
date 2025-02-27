@@ -1,4 +1,4 @@
-;; Fantasy Sports League Management Contract - Version 2 (Player Tracking)
+;; Fantasy Sports Team Management Contract
 ;; Built with Clarity on the Stacks Blockchain
 
 ;; League ID counter
@@ -11,8 +11,7 @@
       name: (string-ascii 256), 
       prize-distribution: (list 3 uint),
       total-pool: uint,
-      total-awarded: uint,
-      season-ended: bool })
+      total-awarded: uint })
 
 ;; Store individual player data
 (define-map players
@@ -65,8 +64,7 @@
                   name: validated-name,
                   prize-distribution: validated-prize-distribution,
                   total-pool: u0,
-                  total-awarded: u0,
-                  season-ended: false })
+                  total-awarded: u0 })
                   
             (map-set player-counts
                 { league-id: league-id }
@@ -90,9 +88,6 @@
         (let ((validated-league-id league-id)
               (validated-amount amount)
               (league-data (unwrap-panic (map-get? leagues { id: league-id }))))
-            
-            ;; Validate league is still active
-            (asserts! (not (get season-ended league-data)) (err u403))
             
             ;; Check if player exists
             (if (is-none (map-get? players { league-id: validated-league-id, player: tx-sender }))
@@ -124,16 +119,15 @@
                   name: (get name league-data),
                   prize-distribution: (get prize-distribution league-data),
                   total-pool: (+ (get total-pool league-data) validated-amount),
-                  total-awarded: (get total-awarded league-data),
-                  season-ended: (get season-ended league-data) })
+                  total-awarded: (get total-awarded league-data) })
             
             (ok true)
         )
     )
 )
 
-;; End the fantasy season
-(define-public (end-season (league-id uint))
+;; Distribute prize money
+(define-public (distribute-prizes (league-id uint))
     (begin
         ;; Validate league-id
         (asserts! (validate-league-id league-id) (err u100))
@@ -144,36 +138,49 @@
             ;; Validate authorization
             (asserts! (is-eq tx-sender (get commissioner league-data)) (err u102))
             
-            ;; Validate season not already ended
-            (asserts! (not (get season-ended league-data)) (err u403))
+            ;; Validate distribution not already done
+            (asserts! (< (get total-awarded league-data) (get total-pool league-data)) (err u403))
             
-            ;; Update season status
-            (map-set leagues
-                { id: validated-league-id }
-                { commissioner: (get commissioner league-data),
-                  name: (get name league-data),
-                  prize-distribution: (get prize-distribution league-data),
-                  total-pool: (get total-pool league-data),
-                  total-awarded: (get total-awarded league-data),
-                  season-ended: true })
-            
-            (ok true)
+            (let ((total-pool (get total-pool league-data))
+                  (prize-distribution (get prize-distribution league-data)))
+                
+                ;; Pay first place
+                (let ((first-share (default-to u0 (element-at prize-distribution u0)))
+                      (first-amount (/ (* total-pool first-share) u100)))
+                    (try! (stx-transfer? first-amount tx-sender (get commissioner league-data)))
+                )
+                
+                ;; Pay second place if exists
+                (if (is-some (map-get? league-players { league-id: validated-league-id, index: u0 }))
+                    (let ((player-data (unwrap-panic (map-get? league-players { league-id: validated-league-id, index: u0 })))
+                          (second-share (default-to u0 (element-at prize-distribution u1)))
+                          (second-amount (/ (* total-pool second-share) u100)))
+                        (try! (stx-transfer? second-amount tx-sender (get player player-data)))
+                    )
+                    true
+                )
+                
+                ;; Pay third place if exists
+                (if (is-some (map-get? league-players { league-id: validated-league-id, index: u1 }))
+                    (let ((player-data (unwrap-panic (map-get? league-players { league-id: validated-league-id, index: u1 })))
+                          (third-share (default-to u0 (element-at prize-distribution u2)))
+                          (third-amount (/ (* total-pool third-share) u100)))
+                        (try! (stx-transfer? third-amount tx-sender (get player player-data)))
+                    )
+                    true
+                )
+                
+                ;; Update distribution status
+                (map-set leagues
+                    { id: validated-league-id }
+                    { commissioner: (get commissioner league-data),
+                      name: (get name league-data),
+                      prize-distribution: prize-distribution,
+                      total-pool: total-pool,
+                      total-awarded: total-pool })
+                
+                (ok true)
+            )
         )
-    )
-)
-
-;; Get league details
-(define-read-only (get-league-details (league-id uint))
-    (begin
-        (asserts! (validate-league-id league-id) (err u100))
-        (ok (unwrap-panic (map-get? leagues { id: league-id })))
-    )
-)
-
-;; Get player count in a league
-(define-read-only (get-player-count (league-id uint))
-    (begin
-        (asserts! (validate-league-id league-id) (err u100))
-        (ok (get count (default-to { count: u0 } (map-get? player-counts { league-id: league-id }))))
     )
 )
